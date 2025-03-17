@@ -1,75 +1,68 @@
 #!/usr/bin/env python3
-import sys
 import socket
+import sys
+import threading
 
-def main():
+def load_ts2_database():
+    """
+    Reads ts2database.txt where each line is of the form:
+    DomainName IPAddress
+    """
+    db = {}
+    with open("ts2database.txt", "r") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                parts = line.split()
+                if len(parts) == 2:
+                    domain, ip = parts
+                    db[domain.lower()] = (domain, ip)
+    return db
 
+def log_response(response):
+    """Append the given response line to ts2responses.txt."""
+    with open("ts2responses.txt", "a") as f:
+        f.write(response + "\n")
 
-    if len(sys.argv) != 2:
-        print("Usage: python3 ts2.py <rudns_port>")
-        sys.exit(1)
-
+def handle_client(conn, addr):
     try:
-        rudns_port = int(sys.argv[1])
-    except ValueError:
-        print("Error: rudns_port must be an integer.")
-        sys.exit(1)
+        data = conn.recv(1024).decode().strip()
+        if not data:
+            conn.close()
+            return
+        # Expecting: "0 DomainName identification flag"
+        parts = data.split()
+        if len(parts) != 4:
+            conn.close()
+            return
+        req_type, domain, ident, flag = parts
+        domain_lower = domain.lower()
+        global ts2_db
+        if domain_lower in ts2_db:
+            orig_domain, ip = ts2_db[domain_lower]
+            response = f"1 {orig_domain} {ip} {ident} aa"
+        else:
+            response = f"1 {domain} 0.0.0.0 {ident} nx"
+        log_response(response)
+        conn.sendall(response.encode())
+    except Exception as e:
+        print("Error in TS2:", e)
+    finally:
+        conn.close()
 
-    database = {}
-    try:
-        with open("ts2database.txt", "r") as db_file:
-            for line in db_file:
-                line = line.strip()
-                if not line:
-                    continue  # skip empty lines
-                domain, ip_addr = line.split()
-                database[domain.lower()] = (domain, ip_addr)
-    except FileNotFoundError:
-        print("Error: ts2database.txt not found in current directory.")
-        sys.exit(1)
-
+def start_ts2_server(rudns_port):
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.bind(('', rudns_port))
+    server_socket.bind(('', int(rudns_port)))
     server_socket.listen(5)
-
-    print(f"[TS2] Listening on port {rudns_port} ...")
-
-    with open("ts2responses.txt", "w") as log_file:
-        while True:
-            client_socket, client_address = server_socket.accept()
-            try:
-                request_data = client_socket.recv(1024).decode('utf-8').strip()
-                if not request_data:
-                    client_socket.close()
-                    continue
-
-                parts = request_data.split()
-                if len(parts) != 4:
-                    client_socket.close()
-                    continue
-
-                msg_type, domain_name, identification, flags = parts
-
-                if msg_type != "0":
-                    client_socket.close()
-                    continue
-
-                lookup_key = domain_name.lower()
-                if lookup_key in database:
-                    stored_domain, ip_address = database[lookup_key]
-                    response_flag = "aa"
-                    response = f"1 {stored_domain} {ip_address} {identification} {response_flag}"
-                else:
-                    response_flag = "nx"
-                    response = f"1 {domain_name} 0.0.0.0 {identification} {response_flag}"
-
-                client_socket.sendall(response.encode('utf-8'))
-
-                log_file.write(response + "\n")
-                log_file.flush()
-
-            finally:
-                client_socket.close()
+    print("TS2 server listening on port", rudns_port)
+    while True:
+        conn, addr = server_socket.accept()
+        threading.Thread(target=handle_client, args=(conn, addr)).start()
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) != 2:
+        print("Usage: python3 ts2.py rudns_port")
+        sys.exit(1)
+    rudns_port = sys.argv[1]
+    ts2_db = load_ts2_database()
+    start_ts2_server(rudns_port)
